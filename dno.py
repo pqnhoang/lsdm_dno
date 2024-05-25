@@ -125,16 +125,16 @@ class DNO:
                 else:
                     info["loss_diff"] = [0] * batch_size
 
-                # decorrelate
-                if self.conf.decorrelate_scale > 0:
-                    loss_decorrelate = noise_regularize_1d(
-                        self.current_z,
-                        dim=self.conf.decorrelate_dim,
-                    )
-                    loss += self.conf.decorrelate_scale * loss_decorrelate.sum()
-                    info["loss_decorrelate"] = loss_decorrelate.detach().cpu()
-                else:
-                    info["loss_decorrelate"] = [0] * batch_size
+                # # decorrelate
+                # if self.conf.decorrelate_scale > 0:
+                #     loss_decorrelate = noise_regularize_1d(
+                #         self.current_z,
+                #         dim=self.conf.decorrelate_dim,
+                #     )
+                #     loss += self.conf.decorrelate_scale * loss_decorrelate.sum()
+                #     info["loss_decorrelate"] = loss_decorrelate.detach().cpu()
+                # else:
+                #     info["loss_decorrelate"] = [0] * batch_size
 
                 # backward
                 self.optimizer.zero_grad()
