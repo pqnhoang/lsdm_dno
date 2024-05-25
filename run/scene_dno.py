@@ -321,7 +321,7 @@ if __name__ == '__main__':
     f = open(os.path.join(output_dir, "results.txt"), "w+")
     is_editing_task = True
     noise_opt_conf = DNOOptions(
-            num_opt_steps=1000 if is_editing_task else 500,
+            num_opt_steps=500 if is_editing_task else 500,
             diff_penalty_scale=2e-3 if is_editing_task else 0,
         )
 
