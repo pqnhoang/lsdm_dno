@@ -13,7 +13,7 @@ class DNOOptions:
             "help": "Number of optimization steps (300 for editing, 500 for refinement, can go further for better results)"
         },
     )
-    lr: float = field(default=0.1, metadata={"help": "Learning rate"})
+    lr: float = field(default=0.07, metadata={"help": "Learning rate"})
     perturb_scale: float = field(
         default=0, metadata={"help": "scale of the noise perturbation"}
     )
@@ -117,13 +117,13 @@ class DNO:
                 #loss = loss.sum()
 
                 # diff penalty
-                if self.conf.diff_penalty_scale > 0:
-                    # [batch_size,]
-                    loss_diff = (self.current_z - self.start_z).norm(p=2, dim=self.dims)
-                    loss += self.conf.diff_penalty_scale * loss_diff.sum()
-                    info["loss_diff"] = loss_diff.detach().cpu()
-                else:
-                    info["loss_diff"] = [0] * batch_size
+                # if self.conf.diff_penalty_scale > 0:
+                #     # [batch_size,]
+                #     loss_diff = (self.current_z - self.start_z).norm(p=2, dim=self.dims)
+                #     loss += self.conf.diff_penalty_scale * loss_diff.sum()
+                #     info["loss_diff"] = loss_diff.detach().cpu()
+                # else:
+                #     info["loss_diff"] = [0] * batch_size
 
                 # # decorrelate
                 # if self.conf.decorrelate_scale > 0:
@@ -180,17 +180,17 @@ class DNO:
                 prog.set_postfix({"loss": info["loss"].mean().item()})
 
             # output is a list (over batch) of dict (over keys) of lists (over steps)
-            hist = []
-            for i in range(batch_size):
-                hist.append({})
-                for k in self.hist[0].keys():
-                    hist[-1][k] = [info[k][i] for info in self.hist]
+            # hist = []
+            # for i in range(batch_size):
+            #     hist.append({})
+            #     for k in self.hist[0].keys():
+            #         hist[-1][k] = [info[k][i] for info in self.hist]
             return {
                 # last step's z
                 "z": self.current_z.detach(),
                 # previous steps' x
                 "x": x.detach(),
-                "hist": hist,
+                # "hist": hist,
             }
 
     def set_lr(self, lr):
