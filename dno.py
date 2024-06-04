@@ -2,7 +2,7 @@ import math
 import torch
 from tqdm import tqdm
 from dataclasses import dataclass, field
-
+import wandb 
 
 @dataclass
 class DNOOptions:
@@ -13,7 +13,7 @@ class DNOOptions:
             "help": "Number of optimization steps (300 for editing, 500 for refinement, can go further for better results)"
         },
     )
-    lr: float = field(default=0.07, metadata={"help": "Learning rate"})
+    lr: float = field(default=0.1, metadata={"help": "Learning rate"})
     perturb_scale: float = field(
         default=0, metadata={"help": "scale of the noise perturbation"}
     )
@@ -34,7 +34,7 @@ class DNOOptions:
         default=1000, metadata={"help": "penalty for the decorrelation of the noise"}
     )
     decorrelate_dim: int = field(
-        default=2,
+        default=3,
         metadata={
             "help": "dimension to decorrelate (we usually decorrelate time dimension)"
         },
@@ -45,7 +45,12 @@ class DNOOptions:
         if self.lr_decay_steps is None:
             self.lr_decay_steps = self.num_opt_steps
 
-
+wandb.login(key="c8f1a21c5c6c139ffa2367705a42b34cd76f55b5")
+wandb.init(project='scene_optimize', entity='pqnhhhhhhh', config={
+    'learning_rate': 0.1,
+    'epochs': 100,
+    'batch_size': 1
+})
 class DNO:
     """
     Args:
@@ -91,106 +96,108 @@ class DNO:
         # }
         self.hist = []
 
+
     def __call__(self, num_steps: int = None):
         if num_steps is None:
             num_steps = self.conf.num_opt_steps
 
-        batch_size = 1
+        batch_size = self.start_z.shape[0]
         with tqdm(range(num_steps)) as prog:
             for i in prog:
-                info = {"step": [self.step_count] * batch_size}
+                with torch.autograd.set_detect_anomaly(True):
+                    info = {"step": [self.step_count] * batch_size}
+                    # learning rate scheduler
+                    lr_frac = 1
+                    if len(self.lr_scheduler) > 0:
+                        for scheduler in self.lr_scheduler:
+                            lr_frac *= scheduler(self.step_count)
+                        self.set_lr(self.conf.lr * lr_frac)
+                    info["lr"] = [self.conf.lr * lr_frac] * batch_size
 
-                # learning rate scheduler
-                lr_frac = 1
-                if len(self.lr_scheduler) > 0:
-                    for scheduler in self.lr_scheduler:
-                        lr_frac *= scheduler(self.step_count)
-                    self.set_lr(self.conf.lr * lr_frac)
-                info["lr"] = [self.conf.lr * lr_frac] * batch_size
+                    # criterion
+                    x = self.model(self.current_z)
+                    # [batch_size,]
+                    loss = self.criterion(x)
+                    info["loss"] = loss.detach().cpu()
+                    loss = loss.sum()
 
-                # criterion
-                x = self.model(self.current_z)
-                # [batch_size,]
-                loss = self.criterion(x)
-                
-                info["loss"] = loss.detach().cpu()
-                #loss = loss.sum()
+                    # diff penalty
+                    if self.conf.diff_penalty_scale > 0:
+                        # [batch_size,]
+                        loss_diff = (self.current_z - self.start_z).norm(p=2, dim=self.dims)
+                        loss += self.conf.diff_penalty_scale * loss_diff.sum()
+                        info["loss_diff"] = loss_diff.detach().cpu()
+                    else:
+                        info["loss_diff"] = [0] * batch_size
 
-                # diff penalty
-                # if self.conf.diff_penalty_scale > 0:
-                #     # [batch_size,]
-                #     loss_diff = (self.current_z - self.start_z).norm(p=2, dim=self.dims)
-                #     loss += self.conf.diff_penalty_scale * loss_diff.sum()
-                #     info["loss_diff"] = loss_diff.detach().cpu()
-                # else:
-                #     info["loss_diff"] = [0] * batch_size
+                    # # decorrelate
+                    # if self.conf.decorrelate_scale > 0:
+                    #     loss_decorrelate = noise_regularize_1d(
+                    #         self.current_z,
+                    #         dim=self.conf.decorrelate_dim,
+                    #     )
+                    #     assert loss_decorrelate.shape == (batch_size,)
+                    #     loss += self.conf.decorrelate_scale * loss_decorrelate.sum()
+                    #     info["loss_decorrelate"] = loss_decorrelate.detach().cpu()
+                    # else:
+                    #     info["loss_decorrelate"] = [0] * batch_size
 
-                # # decorrelate
-                # if self.conf.decorrelate_scale > 0:
-                #     loss_decorrelate = noise_regularize_1d(
-                #         self.current_z,
-                #         dim=self.conf.decorrelate_dim,
-                #     )
-                #     loss += self.conf.decorrelate_scale * loss_decorrelate.sum()
-                #     info["loss_decorrelate"] = loss_decorrelate.detach().cpu()
-                # else:
-                #     info["loss_decorrelate"] = [0] * batch_size
+                    # backward
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    # log grad norm (before)
+                    info["grad_norm"] = (
+                        self.current_z.grad.norm(p=2, dim=self.dims).detach().cpu()
+                    )
 
-                # backward
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # log grad norm (before)
-                info["grad_norm"] = (
-                    self.current_z.grad.norm(p=2, dim=self.dims).detach().cpu()
-                )
+                    # grad mode
+                    if self.current_z.grad is not None:
+                        grad_norm = self.current_z.grad.norm(p=2, dim=self.dims)
+                        self.current_z.grad /= grad_norm  # Normalize gradient
+                        wandb.log({"Loss": loss.item(), "Gradient Norm": grad_norm.item()})
+                    else:
+                        wandb.log({"Loss": loss.item(), "Gradient Norm": None})
+                        raise ValueError("Gradient is None, check the computation path for errors")
+                    # optimize z
+                    self.optimizer.step()
+                    # noise perturbation
+                    # match the noise fraction to the learning rate fraction
+                    noise_frac = lr_frac
+                    info["perturb_scale"] = [
+                        self.conf.perturb_scale * noise_frac
+                    ] * batch_size
 
-                # grad mode
-                self.current_z.grad.data /= self.current_z.grad.norm(
-                    p=2, dim=self.dims, keepdim=True
-                )
+                    noise = torch.randn_like(self.current_z)
+                    self.current_z.data += noise * self.conf.perturb_scale * noise_frac
 
-                # optimize z
-                self.optimizer.step()
-                
-                # noise perturbation
-                # match the noise fraction to the learning rate fraction
-                noise_frac = lr_frac
-                info["perturb_scale"] = [
-                    self.conf.perturb_scale * noise_frac
-                ] * batch_size
+                    # log the norm(z - start_z)
+                    info["diff_norm"] = (
+                        (self.current_z - self.start_z)
+                        .norm(p=2, dim=self.dims)
+                        .detach()
+                        .cpu()
+                    )
 
-                noise = torch.randn_like(self.current_z)
-                self.current_z.data += noise * self.conf.perturb_scale * noise_frac
+                    # log current z
+                    info["z"] = self.current_z.detach().cpu()
+                    info["x"] = x.detach().cpu()
 
-                # log the norm(z - start_z)
-                info["diff_norm"] = (
-                    (self.current_z - self.start_z)
-                    .norm(p=2, dim=self.dims)
-                    .detach()
-                    .cpu()
-                )
-
-                # log current z
-                info["z"] = self.current_z.detach().cpu()
-                info["x"] = x.detach().cpu()
-
-                self.step_count += 1
-                self.hist.append(info)
-                prog.set_postfix({"loss": info["loss"].mean().item()})
+                    self.step_count += 1
+                    self.hist.append(info)
+                    prog.set_postfix({"loss": info["loss"].mean().item()})
 
             # output is a list (over batch) of dict (over keys) of lists (over steps)
-            # hist = []
-            # for i in range(batch_size):
-            #     hist.append({})
-            #     for k in self.hist[0].keys():
-            #         hist[-1][k] = [info[k][i] for info in self.hist]
+            hist = []
+            for i in range(batch_size):
+                hist.append({})
+                for k in self.hist[0].keys():
+                    hist[-1][k] = [info[k][i] for info in self.hist]
             return {
                 # last step's z
                 "z": self.current_z.detach(),
                 # previous steps' x
                 "x": x.detach(),
-                # "hist": hist,
+                #"hist": hist,
             }
 
     def set_lr(self, lr):
@@ -222,7 +229,7 @@ def cosine_decay_scheduler(step, decay_steps, total_steps, decay_first=True):
         ) / 2
 
 
-def noise_regularize_1d(noise, stop_at=2, dim=2):
+def noise_regularize_1d(noise, stop_at=2, dim=3):
     """
     Args:
         noise (torch.Tensor): (N, C, 1, size)
