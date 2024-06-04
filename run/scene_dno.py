@@ -137,68 +137,65 @@ def transform_pcd(source, target):
     target_obj = pcd_source.points
     target_obj = torch.from_numpy(np.asarray(target_obj)).unsqueeze(0).to(dv)
     return target_obj, best_reg
-# def p_loop_with_gradient(
-#     diffusion: GaussianDiffusion,
-#     model,
-#     shape,
-#     mask,
-#     given_objs,
-#     given_cats,
-#     y,
-#     clip_denoised=None,
-#     cond_fn=None,
-#     noise=None,
-#     model_kwargs=None,
-#     const_noise=False,
-#     device=None,
-#     progress=False,
-#     gradient_checkpoint=False,
-# ):
-#     if device is None:
-#         device = next(model.parameters()).device
-#     assert isinstance(shape, (tuple, list))
-#     if noise is not None:
-#         img = noise
-#     else:
-#         img = torch.randn(*shape, device=device)
+def p_loop_with_gradient(
+    diffusion: GaussianDiffusion,
+    model,
+    shape,
+    mask,
+    given_objs,
+    given_cats,
+    y,
+    clip_denoised=False,
+    progress=False,
+    noise=None,
+    device=None,
+    gradient_checkpoint=False,
+):
+    if device is None:
+        device = next(model.parameters()).device
+    assert isinstance(shape, (tuple, list))
+    if noise is not None:
+        img = noise
+    else:
+        img = torch.randn(*shape, device=device)
 
-#     indices = list(range(diffusion.num_timesteps))[::-1]
+    indices = list(range(diffusion.num_timesteps))[::-1]
 
-#     if progress:
-#         # Lazy import so that we don't depend on tqdm.
-#         from tqdm.auto import tqdm
+    if progress:
+        # Lazy import so that we don't depend on tqdm.
+        from tqdm.auto import tqdm
 
-#         indices = tqdm(indices)
+        indices = tqdm(indices)
 
-#     def grad_checkpoint_wrapper(func):
-#         def func_with_checkpoint(*args, **kwargs):
-#             return torch.utils.checkpoint.checkpoint(
-#                 func, *args, **kwargs, use_reentrant=False
-#             )
+    def grad_checkpoint_wrapper(func):
+        def func_with_checkpoint(*args, **kwargs):
+            return torch.utils.checkpoint.checkpoint(
+                func, *args, **kwargs, use_reentrant=False
+            )
 
-#         return func_with_checkpoint
+        return func_with_checkpoint
 
-#     for i in indices:
-#         t = torch.tensor([i] * shape[0], device=device)
-#         sample_fn = diffusion.p_sample
-#         if gradient_checkpoint:
-#             sample_fn = grad_checkpoint_wrapper(sample_fn)
-#         out = sample_fn(
-#             model,
-#             img,
-#             mask,
-#             t,
-#             given_objs, 
-#             given_cats,
-#             y,
-#             clip_denoised=clip_denoised,
-#             denoised_fn=None,
-#             cond_fn=cond_fn,
-#             model_kwargs=model_kwargs,
-#             const_noise=const_noise,
-#         )
-#         img = out["sample"]
-#     return img
+    for i in indices:
+        t = torch.tensor([i] * shape[0], device=device)
+        sample_fn = diffusion.p_sample
+        if gradient_checkpoint:
+            sample_fn = grad_checkpoint_wrapper(sample_fn)
+        out = sample_fn(
+            model,
+            img,
+            mask,
+            t,
+            given_objs, 
+            given_cats,
+            y,
+            clip_denoised=clip_denoised,
+            denoised_fn=None,
+            cond_fn=None,
+            model_kwargs=None,
+            const_noise=False,
+        )
+        img = out["sample"]
+    return img
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("data_dir", type=str,
@@ -294,6 +291,7 @@ if __name__ == '__main__':
     model.eval()
     checkpoint = torch.load(ckpt_path)
     model.load_state_dict(checkpoint['model_state_dict'])
+    torch.autograd.set_detect_anomaly(True)
 
     # Setup names for output files
     context_dir = os.path.join(data_dir, 'context')
@@ -360,36 +358,25 @@ if __name__ == '__main__':
         #loss_fn = chamfer_distance()
         criterion = lambda x: chamfer_distance(x, target_obj.float().to(device))[0]
         #x_start
-
-        torch.manual_seed(0)
         # use the batch size that comes from main()
         target_obj_shape = list(target_obj.shape)
         cur_xt = torch.randn(target_obj_shape)
         cur_xt = cur_xt.float().to(device)                
-
-        sample_fn = (
-            diffusion.p_sample_loop
-        )
+        cur_xt = cur_xt.detach().requires_grad_()
+        
         def solver(z):
-            return sample_fn(
+            return p_loop_with_gradient(
+                diffusion,
                 model,
                 target_obj_shape,
                 mask,
                 given_objs,
                 given_cats,
-                y=y,
-                clip_denoised=clip_denoised,
-                model_kwargs=None,
-                skip_timesteps=0,  # 0 is the default value - i.e. don't skip any step
-                init_image=None,
+                y,
+                clip_denoised=False,
                 progress=False,
-                dump_steps=None,
                 noise=z,
-                const_noise=False,
-                cond_fn_with_grad=True,
-                # when experimenting guidance_scale we want to nutrileze the effect of noise on generation
-            )
-        
+                gradient_checkpoint=True)
 
         #metric log initialize
         chamfer_s = 0
@@ -398,12 +385,29 @@ if __name__ == '__main__':
         class_acc = dict()
         use_ddim = False  # FIXME - hardcoded
         clip_denoised = False  # FIXME - hardcoded
-
         noise_opt = DNO(
             model=solver, criterion=criterion, start_z=cur_xt, conf=noise_opt_conf
         )
         out = noise_opt()
-        print(out['hist'])
+
+        # with torch.no_grad():
+        #     sample = sample_fn(
+        #         model,
+        #         target_obj_shape,
+        #         mask,
+        #         given_objs,
+        #         given_cats,
+        #         y=y,
+        #         clip_denoised=clip_denoised,
+        #         model_kwargs=None,
+        #         skip_timesteps=0,  # 0 is the default value - i.e. don't skip any step
+        #         init_image=None,
+        #         progress=False,
+        #         dump_steps=None,
+        #         noise=None,
+        #         const_noise=False,
+        #         # when experimenting guidance_scale we want to nutrileze the effect of noise on generation
+        #     )
         pred = out["x"].detach().clone()
         pred = pred.float().to(device)
         target_obj = target_obj.float().to(device)
@@ -452,10 +456,11 @@ if __name__ == '__main__':
         if not os.path.exists(os.path.join(output_dir, 'guiding_points')):
             os.makedirs(os.path.join(output_dir, 'guiding_points'))
         with open(os.path.join(output_dir, 'guiding_points', out_file + '.npy'), 'wb') as fp:
-            guiding_points = guiding_points[0].cpu().detach().numpy()
+            guiding_points = guiding_points[0].cpu().numpy()
             np.save(fp, guiding_points)
         print(emd_loss)
         print(loss)
+        break
 
     f.write("Final Chamfer distance: {:.4f}".format(list_mean(chamfer_list)) + '\n')
     f.write("Final EMD: {:.4f}".format(list_mean(emd_list)) + '\n')
